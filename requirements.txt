@@ -1,0 +1,12 @@
+# Core Dependencies
+aiogram==3.13.1
+aiosqlite==0.20.0
+pydantic>=2.0,<2.9
+psutil>=5.8.0
+
+# Additional Dependencies
+aiohttp>=3.8.0
+asyncio-mqtt>=0.11.0
+python-dotenv>=1.0.0
+schedule>=1.2.0
+pytz>=2023.3
