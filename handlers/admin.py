@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+ 
 import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
