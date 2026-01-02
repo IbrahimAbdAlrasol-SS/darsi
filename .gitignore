@@ -66,3 +66,5 @@ tmp/
 
 # Config files with real data
 config_real.json
+config.json
+teachers.json
