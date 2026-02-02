@@ -2,6 +2,10 @@
     "bot_token": "YOUR_BOT_TOKEN_HERE",
     "superadmin_id": YOUR_SUPERADMIN_ID,
     "database_path": "school_bot.db",
+    "storage_channel": {
+        "username": "@YOUR_STORAGE_CHANNEL",
+        "channel_id": null
+    },
     "support_channel": "@YOUR_SUPPORT_CHANNEL",
     "force_join_channel": null,
     "force_join": {

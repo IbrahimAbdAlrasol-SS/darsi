@@ -14,15 +14,9 @@ class ForceJoinMiddleware(BaseMiddleware):
         self.config = config
         self.logger = logging.getLogger(__name__)
         
-        # Get force join settings from config
-        self.force_join_enabled = config.get("force_join", {}).get("enabled", False)
-        self.channel_id = config.get("force_join", {}).get("channel_id")
-        self.channel_username = config.get("force_join", {}).get("channel_username", "")
-        
-        # Fallback to old config format
-        if not self.channel_id and config.get("force_join_channel"):
-            self.channel_username = config.get("force_join_channel")
-            self.force_join_enabled = True
+        # Get force join settings from config (static fallback)
+        self.config_channel_id = config.get("force_join", {}).get("channel_id")
+        self.config_channel_username = config.get("force_join", {}).get("channel_username") or config.get("force_join_channel")
 
     async def __call__(
         self,
@@ -31,11 +25,38 @@ class ForceJoinMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         
-        # Skip if force join is disabled
-        if not self.force_join_enabled or not (self.channel_id or self.channel_username):
+        # Get DB manager
+        db = data.get("db")
+        if not db:
+            return await handler(event, data)
+
+        # 1. Get channels from DB
+        db_channels = await db.get_force_join_channels()
+        
+        # 2. Prepare active channels list
+        active_channels = []
+        if db_channels:
+            for ch in db_channels:
+                active_channels.append({
+                    'id': ch['channel_id'],
+                    'username': ch['channel_username'],
+                    'title': ch['channel_title'] or "قناة"
+                })
+        else:
+             # Fallback to old config if DB is empty
+             config_id = self.config_channel_id
+             config_username = self.config_channel_username
+             if config_id or config_username:
+                 active_channels.append({
+                     'id': config_id,
+                     'username': config_username,
+                     'title': "قناة البوت"
+                 })
+        
+        if not active_channels:
             return await handler(event, data)
         
-        # Get user and bot from event
+        # Get user
         user = None
         if isinstance(event, Message):
             user = event.from_user
@@ -50,95 +71,71 @@ class ForceJoinMiddleware(BaseMiddleware):
         if is_superadmin:
             return await handler(event, data)
         
-        # Only check membership for specific bot interactions, not regular group chat messages
-        should_check_membership = False
-        
-        if isinstance(event, Message):
-            # Check for bot commands or private chat
-            if event.chat.type == "private":
-                should_check_membership = True
-            elif event.text and (event.text.startswith('/') or event.text.startswith('@')):
-                # Bot commands or mentions
-                should_check_membership = True
-        elif isinstance(event, CallbackQuery):
-            # All callback queries should be checked
-            should_check_membership = True
-        
-        if not should_check_membership:
-            return await handler(event, data)
-        
-        # Get bot instance
+        # Enforce for ALL interactions
         bot = data.get("bot")
         if not bot:
             return await handler(event, data)
         
-        # Check if user is member of channel
-        try:
-            channel_to_check = self.channel_id or self.channel_username
-            member = await bot.get_chat_member(channel_to_check, user.id)
-            
-            # If user is not a member or left the channel
-            if member.status in ["left", "kicked"]:
-                await self._send_force_join_message(event, user, bot)
-                return  # Stop processing
-                
-        except Exception as e:
-            # Handle specific Telegram errors
-            error_str = str(e).lower()
-            if "member list is inaccessible" in error_str or "bad request" in error_str:
-                # Channel privacy settings prevent checking membership
-                # In this case, we'll gracefully continue without blocking
-                self.logger.warning(f"Cannot check membership for channel {channel_to_check}: {e}")
-                return await handler(event, data)
-            else:
-                self.logger.warning(f"Failed to check channel membership for user {user.id}: {e}")
-                # On other errors, continue without blocking (graceful degradation)
-                return await handler(event, data)
+        missing_channels = []
         
-        # User is member, continue processing
-        return await handler(event, data)
+        for channel in active_channels:
+            try:
+                # Prefer ID if available
+                chat_id = channel['id'] if channel['id'] else channel['username']
+                member = await bot.get_chat_member(chat_id, user.id)
+                if member.status in ["left", "kicked"]:
+                    missing_channels.append(channel)
+            except Exception as e:
+                self.logger.warning(f"Failed to check membership for {channel}: {e}")
+                # To be safe, if we can't check, we assume they are not a member.
+                missing_channels.append(channel)
+                continue
+
+        if not missing_channels:
+            # User is subscribed to all channels, proceed with the original handler
+            return await handler(event, data)
+        else:
+            # User is not subscribed, block them and send the force-join message.
+            # We also want to answer the callback query if the event is a callback query.
+            if isinstance(event, CallbackQuery):
+                await event.answer()
+            await self._send_force_join_message(event, user, bot, missing_channels)
+            return
     
-    async def _send_force_join_message(self, event, user, bot):
+    async def _send_force_join_message(self, event, user, bot, channels):
         """Send force join message to user"""
         
-        # Create join button
-        channel_link = self.channel_username if self.channel_username.startswith("@") else f"@{self.channel_username}"
-        if self.channel_id and self.channel_id.startswith("-100"):
-            # Private channel, use t.me link
-            channel_link = f"https://t.me/c/{self.channel_id[4:]}"
-        elif self.channel_username:
-            channel_link = f"https://t.me/{self.channel_username.lstrip('@')}"
-        else:
-            channel_link = "https://t.me/joinchat/invite_link"  # Fallback
+        text = "🛑 **عذراً عزيزي**\n\n⚠️ يجب عليك الاشتراك في القنوات التالية لاستخدام البوت:\n\n"
         
-        # Force join message
-        text = f"""
-⌔︙عليك الاشتراك في قناة البوت اولاً !
+        keyboard_rows = []
+        
+        for ch in channels:
+            title = ch['title']
+            link = ""
+            username = ch['username']
+            
+            if username and str(username).startswith("@"):
+                 link = f"https://t.me/{username[1:]}"
+            elif username and "t.me" in str(username):
+                 link = str(username)
+            
+            if link:
+                keyboard_rows.append([InlineKeyboardButton(text=f"📢 {title}", url=link)])
+            else:
+                text += f"• {title} (قناة خاصة - لا يمكن إنشاء رابط)\n"
 
-🔗 **القناة:** {self.channel_username or 'قناة البوت'}
-
-"""
+        keyboard_rows.append([InlineKeyboardButton(text="✅ تم الاشتراك", callback_data="check_membership")])
         
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 انضمام", url=channel_link)],
-            [InlineKeyboardButton(text="✅ انضممت", callback_data="check_membership")]
-        ])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         
-        # Send message based on event type
+        # We try to answer the original message/callback with the force-join prompt.
         if isinstance(event, Message):
             try:
                 await event.answer(text, reply_markup=keyboard)
-            except Exception as e:
-                self.logger.error(f"Failed to send force join message: {e}")
+            except Exception:
+                pass
         elif isinstance(event, CallbackQuery):
             try:
-                if event.message:
-                    await event.message.edit_text(text, reply_markup=keyboard)
-                else:
-                    await event.answer("🔒 لأستخدام البوت عليك الاشتراك بلقناة اولا.", show_alert=True)
-            except Exception as e:
-                self.logger.error(f"Failed to edit force join message: {e}")
-                try:
-                    await event.answer("🔒 لأستخدام البوت عليك الاشتراك بلقناة اولا.", show_alert=True)
-                except:
-                    pass
+                await event.message.answer(text, reply_markup=keyboard)
+            except Exception:
+                pass

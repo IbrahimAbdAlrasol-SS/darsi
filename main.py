@@ -17,6 +17,7 @@ from handlers import setup_routers
 from utils.logger import setup_logger
 from middlewares.auth import AuthMiddleware
 from middlewares.database import DatabaseMiddleware
+from middlewares.force_join import ForceJoinMiddleware
 
 
 async def main():
@@ -59,6 +60,10 @@ async def main():
         dp.callback_query.middleware(DatabaseMiddleware(db_manager))
         dp.message.middleware(AuthMiddleware(config))
         dp.callback_query.middleware(AuthMiddleware(config))
+        
+        # Setup ForceJoinMiddleware (after Auth to get user info, but before handlers)
+        dp.message.middleware(ForceJoinMiddleware(config))
+        dp.callback_query.middleware(ForceJoinMiddleware(config))
         
         # Add bot instance to dispatcher data for middlewares
         dp["bot"] = bot

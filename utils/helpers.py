@@ -189,7 +189,9 @@ def format_stats_text(stats: dict) -> str:
             'morning_students': 'صباحي',
             'evening_students': 'المسائي',
             'total_groups': 'المجموعات',
-            'total_classes': 'الشعب'
+            'total_classes': 'الشعب',
+            'total_subjects': 'المواد',
+            'total_files': 'الملفات'
         }
         
         persian_key = persian_keys.get(key, key)
