@@ -23,7 +23,7 @@ class SubjectStates(StatesGroup):
 class FileStates(StatesGroup):
     """States for file management"""
     
-    waiting_for_message_id = State()
+    waiting_for_file = State()
     waiting_for_file_name = State()
     waiting_for_group_base_name = State()
     waiting_for_group_forwards = State()

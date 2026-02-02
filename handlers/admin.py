@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from aiogram import Router, F
+from aiogram import Router, F, types
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -296,6 +296,192 @@ async def admin_delete_class(callback: CallbackQuery, db: DatabaseManager, confi
         await admin_classes(callback, db, config, **kwargs)
     else:
         await callback.answer("❌ خطأ في حذف المرحلة", show_alert=True)
+
+@router.callback_query(F.data.startswith("admin_settings_"))
+async def admin_class_settings(callback: CallbackQuery, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
+    """Show class-specific settings, like storage channel"""
+    user_id = callback.from_user.id
+    if not await check_is_superadmin(user_id, db, config or getattr(router, 'config', None), kwargs): return
+
+    try:
+        class_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        return
+
+    class_info = await db.get_class(class_id)
+    if not class_info:
+        await callback.answer("❌ المرحلة غير موجودة", show_alert=True)
+        return
+
+    has_storage = bool(class_info.get("storage_channel_id"))
+    storage_status = f"موجودة: {class_info.get('storage_channel_id')}" if has_storage else "غير محددة"
+
+    text = (
+        f"⚙️ **إعدادات المرحلة: {class_info['class_name']}**\n\n"
+        f"قناة التخزين هي قناة خاصة يتم فيها حفظ ملفات هذه المرحلة لتقليل الضغط على البوت.\n\n"
+        f"الحالة الحالية: **{storage_status}**"
+    )
+
+    await safe_edit_message(callback, text, InlineKeyboards.admin_class_settings_menu(class_id, has_storage))
+
+@router.callback_query(F.data.startswith("admin_set_storage_"))
+async def admin_set_storage_start(callback: CallbackQuery, state: FSMContext, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
+    """Start setting storage channel"""
+    user_id = callback.from_user.id
+    if not await check_is_superadmin(user_id, db, config or getattr(router, 'config', None), kwargs): return
+
+    try:
+        class_id = int(callback.data.split("_")[3])
+    except (ValueError, IndexError):
+        return
+
+    await state.update_data(class_id=class_id, original_message_id=callback.message.message_id)
+    await state.set_state(ClassManagementStates.waiting_for_storage_channel)
+    
+    await callback.message.edit_text(
+        "📡 **إعداد قناة التخزين**\n\n"
+        "أرسل معرف القناة (مثل: @MyChannel) أو المعرف الرقمي.\n"
+        "⚠️ **تنبيه:** يجب رفع البوت مشرفاً في القناة مع صلاحية إرسال الرسائل.",
+        reply_markup=InlineKeyboards.back_button(f"admin_settings_{class_id}")
+    )
+
+@router.message(ClassManagementStates.waiting_for_storage_channel)
+async def admin_set_storage_process(message: Message, state: FSMContext, db: DatabaseManager, **kwargs):
+    """Process storage channel ID/username/forward"""
+    data = await state.get_data()
+    class_id = data.get("class_id")
+    
+    chat_id = None
+    chat_username = None
+    
+    # 1. Check if it's a forwarded message from a channel
+    if message.forward_from_chat and message.forward_from_chat.type == "channel":
+        chat_id = message.forward_from_chat.id
+        chat_username = message.forward_from_chat.username
+    else:
+        # 2. Check text input
+        user_input = message.text.strip() if message.text else ""
+        if user_input:
+            # Check if it looks like an ID or Username
+            try:
+                # Try getting chat info
+                chat = await message.bot.get_chat(user_input)
+                chat_id = chat.id
+                chat_username = chat.username
+            except Exception as e:
+                await message.answer(f"❌ لم أتمكن من العثور على القناة: {user_input}\nتأكد من المعرف أو قم بتوجيه رسالة من القناة.")
+                return
+        else:
+             await message.answer("❌ الرجاء إرسال معرف القناة أو توجيه رسالة منها.")
+             return
+
+    # Validate Bot Permissions
+    try:
+        member = await message.bot.get_chat_member(chat_id, message.bot.id)
+        if member.status not in ["administrator", "creator"]:
+            await message.answer(
+                "⚠️ **البوت ليس مشرفاً في القناة!**\n\n"
+                "يجب رفع البوت مشرفاً (Admin) في القناة مع صلاحية **نشر الرسائل** (Post Messages) لكي يعمل النظام."
+            )
+            return
+            
+        # Check posting permission specifically if possible (depends on aiogram version/object)
+        if isinstance(member, (types.ChatMemberAdministrator, types.ChatMemberOwner)):
+             # Note: Owner usually has all permissions. Administrator has flags.
+             # We assume if admin, it's likely okay, but good to check if we could.
+             pass
+
+    except Exception as e:
+        await message.answer(f"❌ حدث خطأ أثناء التحقق من القناة: {e}")
+        return
+
+    # Save to DB
+    # Fix: Pass arguments correctly (username, channel_id)
+    if await db.set_class_storage_channel(class_id, username=chat_username, channel_id=chat_id):
+        # Send test message immediately
+        try:
+            await message.bot.send_message(chat_id, "✅ تم ربط هذه القناة بنجاح كقناة تخزين للبوت.")
+            await message.answer(f"✅ تم تعيين قناة التخزين بنجاح: {chat_username or chat_id}\n📢 تم إرسال رسالة اختبار للقناة للتأكد من الصلاحيات.")
+        except Exception as e:
+            await message.answer(f"⚠️ تم حفظ القناة، ولكن فشل إرسال رسالة الاختبار: {e}\nيرجى التأكد من أن البوت مشرف ولديه صلاحية **نشر الرسائل**.")
+    else:
+        await message.answer("❌ حدث خطأ في قاعدة البيانات.")
+        return
+
+    await state.clear()
+
+    # --- REFRESH LOGIC ---
+    # Refresh the settings menu
+    try:
+        class_info = await db.get_class(class_id)
+        if class_info:
+            has_storage = bool(class_info.get("storage_channel_id"))
+            storage_status = f"✅ موجودة: {class_info.get('storage_channel_username') or class_info.get('storage_channel_id')}" if has_storage else "❌ غير محددة"
+
+            text = (
+                f"⚙️ **إعدادات المرحلة: {class_info['class_name']}**\n\n"
+                f"قناة التخزين هي قناة خاصة يتم فيها حفظ ملفات هذه المرحلة لتقليل الضغط على البوت.\n\n"
+                f"الحالة الحالية: **{storage_status}**"
+            )
+            
+            keyboard = InlineKeyboards.admin_class_settings_menu(class_id, has_storage)
+
+            await message.bot.edit_message_text(
+                text=text,
+                chat_id=message.chat.id,
+                message_id=data.get("original_message_id"),
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"Error refreshing settings menu: {e}")
+        
+    # Try to delete the user's message
+    try:
+        await message.delete()
+    except:
+        pass
+
+@router.callback_query(F.data.startswith("admin_clear_storage_"))
+async def admin_clear_storage(callback: CallbackQuery, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
+    """Clear storage channel for a class"""
+    user_id = callback.from_user.id
+    if not await check_is_superadmin(user_id, db, config or getattr(router, 'config', None), kwargs): return
+
+    try:
+        class_id = int(callback.data.split("_")[3])
+        # Use the specific clear method
+        await db.clear_class_storage_channel(class_id)
+        await callback.answer("✅ تم إزالة قناة التخزين.", show_alert=True)
+        
+        # Refresh settings view
+        await admin_class_settings(callback, db, config, **kwargs)
+
+    except Exception as e:
+        logger.error(f"Error clearing storage: {e}")
+        await callback.answer("❌ حدث خطأ.", show_alert=True)
+
+@router.callback_query(F.data.startswith("admin_test_storage_"))
+async def admin_test_storage(callback: CallbackQuery, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
+    """Test storage channel for a class"""
+    user_id = callback.from_user.id
+    if not await check_is_superadmin(user_id, db, config or getattr(router, 'config', None), kwargs): return
+
+    try:
+        class_id = int(callback.data.split("_")[3])
+        class_info = await db.get_class(class_id)
+        storage_id = class_info.get("storage_channel_id")
+
+        if not storage_id:
+            await callback.answer("⚠️ لا توجد قناة تخزين محددة.", show_alert=True)
+            return
+
+        await callback.answer("⏳ جاري إرسال رسالة اختبار...", show_alert=False)
+        await callback.bot.send_message(storage_id, f"رسالة اختبار لقناة تخزين المرحلة: {class_info['class_name']}")
+        await callback.answer("✅ تم إرسال رسالة الاختبار بنجاح!", show_alert=True)
+
+    except Exception as e:
+        logger.error(f"Error testing storage: {e}")
+        await callback.answer(f"❌ فشل الاختبار: {e}", show_alert=True)
 
 @router.callback_query(F.data.startswith("admin_set_manager_"))
 async def admin_set_manager_start(callback: CallbackQuery, state: FSMContext, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):

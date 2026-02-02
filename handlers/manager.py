@@ -405,134 +405,78 @@ async def manager_add_file_start(callback: CallbackQuery, state: FSMContext, db:
         await callback.answer("❌ ليس لديك صلاحية", show_alert=True)
         return
     
-    # Get storage channel from config
-    storage_channel = config.get("storage_channel", {}) if config else {}
-    channel_username = storage_channel.get("username")
-    # Override with per-class storage if available
-    try:
-        class_settings = await db.get_class_settings(subject['class_id'])
-        if class_settings and (class_settings.get('storage_channel_username') or class_settings.get('storage_channel_id')):
-            channel_username = class_settings.get('storage_channel_username') or channel_username
-    except Exception:
-        pass
-    if not channel_username:
-        channel_username = "@SS_Cs1"
+    # Check Storage Channel First
+    class_settings = await db.get_class_settings(subject['class_id'])
+    storage_id = class_settings.get('storage_channel_id') if class_settings else None
     
+    if not storage_id and config:
+        storage_id = config.get("storage_channel", {}).get("channel_id")
+        
+    if not storage_id:
+        await callback.answer("⚠️ لم يتم تحديد قناة تخزين لهذه المرحلة! يرجى مراجعة المشرف.", show_alert=True)
+        return
+
     await state.update_data(subject_id=subject_id, file_type=file_type)
-    await state.set_state(FileStates.waiting_for_message_id)
+    await state.set_state(FileStates.waiting_for_file) 
     
     type_text = "نظري" if file_type == 'theory' else "عملي"
     
     await callback.message.edit_text(
         f"📎 إضافة ملف ({type_text}) للمادة: {subject['subject_name']}\n\n"
-        f"📌 خطوات إضافة الملف:\n"
-        f"1️⃣ ارفع الملف إلى القناة {channel_username}\n"
-        f"2️⃣ انسخ رقم الرسالة (message_id)\n"
-        f"3️⃣ أرسل الرقم هنا\n\n"
-        f"💡 مثال: إذا كان رابط الرسالة:\n"
-        f"https://t.me/{channel_username.replace('@', '')}/1827\n"
-        f"فالرقم هو: 1827\n\n"
-        f"أرسل رقم الرسالة (message_id) الآن:",
+        f"📤 **الآن أرسل الملف مباشرة هنا**\n"
+        f"يمكنك إرسال (ملف، صورة، فيديو، صوت) أو توجيه رسالة من أي قناة.\n"
+        f"سيقوم النظام تلقائياً بنسخ الملف لقناة التخزين.",
         reply_markup=InlineKeyboards.back_button(f"manager_files_{subject_id}_{file_type}")
     )
 
 
-@router.message(StateFilter(FileStates.waiting_for_message_id))
-async def manager_add_file_process(message: Message, state: FSMContext, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
-    """Process message ID input"""
+@router.message(StateFilter(FileStates.waiting_for_file), F.content_type.in_({'document', 'video', 'audio', 'photo', 'voice'}))
+async def manager_add_file_content(message: Message, state: FSMContext, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
+    """Handle direct file forwarding/upload - Auto Copy to Storage"""
     data = await state.get_data()
     subject_id = data.get("subject_id")
-    user_id = message.from_user.id
     
     subject = await db.get_subject(subject_id)
     if not subject:
         await message.answer("❌ المادة غير موجودة")
         await state.clear()
         return
-    
-    # Check if user is manager
-    if not await db.is_class_manager(user_id, subject['class_id']):
-        await message.answer("❌ ليس لديك صلاحية")
-        await state.clear()
-        return
-    
-    # Extract message_id from text (could be just number or full URL)
-    message_text = message.text.strip()
-    
-    # Get storage channel info for validation
+
+    # Get storage channel
     class_settings = await db.get_class_settings(subject['class_id'])
-    storage_username = None
-    storage_id = None
+    storage_id = class_settings.get('storage_channel_id') if class_settings else None
     
-    if class_settings:
-        storage_username = class_settings.get('storage_channel_username')
-        storage_id = class_settings.get('storage_channel_id')
-    
-    if not storage_username and not storage_id and config:
-        # Fallback to global config
-        storage_config = config.get("storage_channel", {})
-        storage_username = storage_config.get("username")
-        storage_id = storage_config.get("channel_id")
+    # Fallback to config
+    if not storage_id and config:
+        storage_id = config.get("storage_channel", {}).get("channel_id")
+        
+    if not storage_id:
+        await message.answer("❌ لم يتم تحديد قناة تخزين لهذه المرحلة. يرجى مراجعة المشرف.")
+        return
 
-    # Normalize storage username (remove @)
-    if storage_username:
-        storage_username = storage_username.lstrip("@").lower()
-
-    # Try to extract message_id from URL or get it directly
-    channel_message_id = None
+    # Copy message to storage channel
     try:
-        # If it's a URL like https://t.me/SS_Cs1/1827
-        if "t.me/" in message_text:
-            parts = message_text.split("/")
-            channel_message_id = int(parts[-1])
-            
-            # Validate Channel if possible
-            if len(parts) >= 2:
-                url_channel = parts[-2].lower() # username or c/123456
-                
-                # Check if it matches configured channel
-                # Case 1: Public channel username
-                if storage_username and url_channel != "c":
-                    if url_channel != storage_username:
-                        await message.answer(
-                            f"⚠️ تنبيه: الرابط من قناة @{url_channel} بينما قناة التخزين هي @{storage_username}.\n"
-                            "يجب أن يكون الملف في قناة التخزين المحددة ليعمل بشكل صحيح.\n\n"
-                            "يرجى إعادة إرسال الرابط الصحيح أو رقم الرسالة من القناة الصحيحة."
-                        )
-                        return
-                
-                # Case 2: Private channel ID (url is t.me/c/1234567890/msg_id)
-                elif url_channel == "c" and len(parts) >= 3:
-                    # In this case parts[-2] is the chat_id without -100 prefix usually
-                    url_chat_id = parts[-2]
-                    # We can't easily validate ID against username without API call, 
-                    # but we can validate against storage_id if we have it.
-                    # This is complex, so we'll skip strict validation for private links for now 
-                    # unless we are sure.
-                    pass
-        else:
-            # It's just a number
-            channel_message_id = int(message_text)
-    except (ValueError, IndexError):
-        await message.answer(
-            "❌ رقم غير صحيح!\n\n"
-            "أرسل رقم الرسالة فقط (مثل: 1827)\n"
-            "أو رابط الرسالة الكامل (مثل: https://t.me/SS_Cs1/1827)"
+        # We use copy_to to preserve content
+        copied = await message.copy_to(chat_id=storage_id)
+        
+        # Save the new message ID
+        await state.update_data(channel_message_id=copied.message_id)
+        await state.set_state(FileStates.waiting_for_file_name)
+        
+        await message.reply(
+            f"✅ تم استلام الملف ونسخه لقناة التخزين.\n\n"
+            "📝 **أرسل اسم الملف الآن:**\n"
+            "(مثلاً: المحاضرة الأولى - مقدمة)"
         )
-        return
-    
-    if channel_message_id <= 0:
-        await message.answer("❌ رقم الرسالة يجب أن يكون أكبر من صفر")
-        return
-    
-    # Optional: Verify message exists in channel (can be skipped if you trust the user)
-    # Store message_id and ask for file name
-    await state.update_data(channel_message_id=channel_message_id)
-    await state.set_state(FileStates.waiting_for_file_name)
-    await message.answer(
-        f"✅ تم حفظ رقم الرسالة: {channel_message_id}\n\n"
-        "الآن أرسل اسم الملف (مثلاً: كتاب البرمجة  - الفصل الأول):"
-    )
+    except Exception as e:
+        logger.error(f"Failed to copy file to storage: {e}")
+        await message.reply(f"❌ فشل نسخ الملف إلى قناة التخزين.\nالسبب: {e}\n\nتأكد من أن البوت مشرف في قناة التخزين ولديه صلاحية النشر.")
+
+
+@router.message(StateFilter(FileStates.waiting_for_file))
+async def manager_add_file_invalid(message: Message, state: FSMContext):
+    """Handle invalid input (text instead of file)"""
+    await message.answer("❌ الرجاء إرسال ملف (pdf, photo, video...) وليس نصاً.\nاضغط /cancel للإلغاء.")
 
 
 @router.message(StateFilter(FileStates.waiting_for_file_name))
