@@ -988,6 +988,30 @@ class DatabaseManager:
             self.logger.error(f"❌ Error adding exam: {e}")
             return None
     
+    async def get_subject_exams_by_type(self, subject_id: int, exam_type: str) -> List[Dict[str, Any]]:
+        """Get all exams for a subject by type"""
+        try:
+            # Map user-friendly type to database value
+            type_map = {
+                "quiz": "كوز",
+                "mid": "مد",
+                "midyear": "نصف سنة",
+                "final": "أخير سنة"
+            }
+            db_exam_type = type_map.get(exam_type, exam_type)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM exams WHERE subject_id = ? AND exam_type = ? ORDER BY upload_date DESC",
+                    (subject_id, db_exam_type)
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except Exception as e:
+            self.logger.error(f"Error getting subject exams by type: {e}")
+            return []
+
     async def get_exam(self, exam_id: int) -> Optional[Dict[str, Any]]:
         """Get exam by ID"""
         try:

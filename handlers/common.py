@@ -182,9 +182,46 @@ async def show_subject_files(callback: CallbackQuery, db: DatabaseManager):
 
 @router.callback_query(F.data.startswith("user_exams_"))
 async def show_subject_exams(callback: CallbackQuery, db: DatabaseManager):
-    """Show exams for selected subject - DISABLED"""
-    await callback.answer("⚠️ تم تعطيل قسم الامتحانات حالياً.", show_alert=True)
-    return
+    """Show exam types for a subject"""
+    subject_id = int(callback.data.split("_")[2])
+    subject = await db.get_subject(subject_id)
+    if not subject:
+        await callback.answer("❌ المادة غير موجودة", show_alert=True)
+        return
+    
+    text = f"📖 المادة: {subject['subject_name']}\n\nاختر نوع الامتحان:"
+    await safe_edit_message(callback, text, InlineKeyboards.user_exam_types(subject_id))
+
+
+@router.callback_query(F.data.startswith("user_exam_type_"))
+async def show_exams_by_type(callback: CallbackQuery, db: DatabaseManager):
+    """Show list of exams for a specific type"""
+    parts = callback.data.split("_")
+    exam_type = parts[3]
+    subject_id = int(parts[4])
+    
+    subject = await db.get_subject(subject_id)
+    if not subject:
+        await callback.answer("❌ المادة غير موجودة", show_alert=True)
+        return
+        
+    exams = await db.get_subject_exams_by_type(subject_id, exam_type)
+    
+    type_map = {
+        "quiz": "كوز",
+        "mid": "مد",
+        "midyear": "نصف سنة",
+        "final": "أخير سنة"
+    }
+    type_text = type_map.get(exam_type, "امتحانات")
+
+    if not exams:
+        await callback.answer(f"📭 لا توجد امتحانات من نوع '{type_text}' حالياً.", show_alert=True)
+        return
+
+    text = f"📖 {subject['subject_name']} | {type_text}\n\nاختر الامتحان للتحميل:"
+    await safe_edit_message(callback, text, InlineKeyboards.user_exams_list(exams, subject_id, exam_type))
+
 
 
 @router.callback_query(F.data.startswith("download_file_"))
@@ -199,11 +236,7 @@ async def download_file(callback: CallbackQuery, db: DatabaseManager, config: Di
     
     try:
         await callback.answer("🚀 جاري التحميل...")
-        # Get storage channel from config
-        storage_channel = config.get("storage_channel", {}) if config else {}
-        channel_username = storage_channel.get("username")
-        channel_id = storage_channel.get("channel_id")
-        channel_identifier = channel_id if channel_id else channel_username
+        channel_identifier = None
         try:
             subject = await db.get_subject(file_info['subject_id'])
             if subject:
@@ -345,11 +378,7 @@ async def download_all_files(callback: CallbackQuery, db: DatabaseManager, confi
     
     await callback.answer("🚀 جاري إرسال جميع الملفات...", show_alert=False)
     
-    # Get storage channel from config
-    storage_channel = config.get("storage_channel", {}) if config else {}
-    channel_username = storage_channel.get("username")
-    channel_id = storage_channel.get("channel_id")
-    channel_identifier = channel_id if channel_id else channel_username
+    channel_identifier = None
     try:
         subject = await db.get_subject(subject_id)
         if subject:
@@ -406,6 +435,67 @@ async def download_all_files(callback: CallbackQuery, db: DatabaseManager, confi
     
     if sent_count > 0:
         await callback.answer(f"✅ تم إرسال {sent_count} ملف بنجاح", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("send_all_exams_"))
+async def send_all_exams(callback: CallbackQuery, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
+    """Send all exams of a specific type for a subject"""
+    parts = callback.data.split("_")
+    subject_id = int(parts[3])
+    exam_type = parts[4]
+    
+    exams = await db.get_subject_exams_by_type(subject_id, exam_type)
+    if not exams:
+        await callback.answer("❌ لا توجد امتحانات لإرسالها.", show_alert=True)
+        return
+        
+    await callback.answer(f"🚀 جاري إرسال {len(exams)} امتحان...", show_alert=False)
+    
+    channel_identifier = None
+    try:
+        subject = await db.get_subject(subject_id)
+        if subject:
+            class_settings = await db.get_class_settings(subject['class_id'])
+            if class_settings:
+                channel_identifier = class_settings.get('storage_channel_id') or class_settings.get('storage_channel_username')
+    except Exception:
+        pass
+
+    if isinstance(channel_identifier, str):
+        try:
+            chat = await callback.message.bot.get_chat(channel_identifier)
+            channel_identifier = chat.id
+        except Exception:
+            if not channel_identifier.startswith("@"):
+                try:
+                    chat = await callback.message.bot.get_chat(f"@{channel_identifier}")
+                    channel_identifier = chat.id
+                except Exception:
+                    pass
+    
+    if not channel_identifier:
+        await callback.message.answer("❌ لا توجد قناة تخزين محددة لهذه المرحلة. تواصل مع المسؤول.")
+        return
+        
+    sent_count = 0
+    for exam in exams:
+        try:
+            if exam.get('channel_message_id'):
+                await callback.message.bot.copy_message(
+                    chat_id=callback.from_user.id,
+                    from_chat_id=channel_identifier,
+                    message_id=exam['channel_message_id'],
+                    caption=f"📝 {exam['title']} ({exam['exam_type']})"
+                )
+                sent_count += 1
+        except Exception as e:
+            logger.error(f"Error sending exam {exam['exam_id']}: {e}")
+            
+    if sent_count > 0:
+        await callback.answer(f"✅ تم إرسال {sent_count} امتحان بنجاح.", show_alert=True)
+    else:
+        await callback.answer("⚠️ لم يتم إرسال أي امتحانات. قد تكون الملفات محذوفة.", show_alert=True)
+
 
 
 @router.callback_query(F.data.startswith("toggle_favorite_"))

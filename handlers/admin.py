@@ -340,40 +340,32 @@ async def admin_set_storage_start(callback: CallbackQuery, state: FSMContext, db
     
     await callback.message.edit_text(
         "📡 **إعداد قناة التخزين**\n\n"
-        "أرسل معرف القناة (مثل: @MyChannel) أو المعرف الرقمي.\n"
-        "⚠️ **تنبيه:** يجب رفع البوت مشرفاً في القناة مع صلاحية إرسال الرسائل.",
+        "لإضافة أو تحديث قناة التخزين، **يجب عليك تحويل (Forward) رسالة من القناة المراد ربطها إلى هنا.**\n\n"
+        "⚠️ **شروط هامة:**\n"
+        "1. يجب أن يكون البوت مشرفاً (Admin) في القناة.\n"
+        "2. يجب أن يمتلك صلاحية **نشر الرسائل**.\n"
+        "3. **لا تقم** بإرسال المعرف كتابةً، فقط قم بتحويل رسالة من القناة.",
         reply_markup=InlineKeyboards.back_button(f"admin_settings_{class_id}")
     )
 
 @router.message(ClassManagementStates.waiting_for_storage_channel)
 async def admin_set_storage_process(message: Message, state: FSMContext, db: DatabaseManager, **kwargs):
-    """Process storage channel ID/username/forward"""
+    """Process storage channel - MUST BE FORWARDED"""
     data = await state.get_data()
     class_id = data.get("class_id")
     
-    chat_id = None
-    chat_username = None
-    
-    # 1. Check if it's a forwarded message from a channel
-    if message.forward_from_chat and message.forward_from_chat.type == "channel":
-        chat_id = message.forward_from_chat.id
-        chat_username = message.forward_from_chat.username
-    else:
-        # 2. Check text input
-        user_input = message.text.strip() if message.text else ""
-        if user_input:
-            # Check if it looks like an ID or Username
-            try:
-                # Try getting chat info
-                chat = await message.bot.get_chat(user_input)
-                chat_id = chat.id
-                chat_username = chat.username
-            except Exception as e:
-                await message.answer(f"❌ لم أتمكن من العثور على القناة: {user_input}\nتأكد من المعرف أو قم بتوجيه رسالة من القناة.")
-                return
-        else:
-             await message.answer("❌ الرجاء إرسال معرف القناة أو توجيه رسالة منها.")
-             return
+    # 1. Strict Check: Must be forwarded from a channel
+    if not (message.forward_from_chat and message.forward_from_chat.type == "channel"):
+        await message.answer(
+            "❌ **خطأ:** يجب عليك تحويل رسالة **من القناة** حصراً.\n"
+            "لا يمكن قبول المعرفات النصية أو الرسائل العادية.\n"
+            "حاول مرة أخرى بتحويل رسالة من القناة."
+        )
+        return
+
+    chat_id = message.forward_from_chat.id
+    chat_username = message.forward_from_chat.username
+    chat_title = message.forward_from_chat.title
 
     # Validate Bot Permissions
     try:
@@ -385,25 +377,25 @@ async def admin_set_storage_process(message: Message, state: FSMContext, db: Dat
             )
             return
             
-        # Check posting permission specifically if possible (depends on aiogram version/object)
-        if isinstance(member, (types.ChatMemberAdministrator, types.ChatMemberOwner)):
-             # Note: Owner usually has all permissions. Administrator has flags.
-             # We assume if admin, it's likely okay, but good to check if we could.
-             pass
+        # Check specific permissions if available in the object
+        can_post = getattr(member, 'can_post_messages', True) # Default to True if attr missing (e.g. creator)
+        if not can_post and member.status == "administrator":
+             await message.answer("⚠️ **البوت لا يملك صلاحية النشر!**\nيرجى تفعيل خيار 'Post Messages' في إعدادات المشرف.")
+             return
 
     except Exception as e:
-        await message.answer(f"❌ حدث خطأ أثناء التحقق من القناة: {e}")
+        await message.answer(f"❌ حدث خطأ أثناء التحقق من القناة: {e}\nتأكد من أن البوت عضو في القناة.")
         return
 
     # Save to DB
-    # Fix: Pass arguments correctly (username, channel_id)
     if await db.set_class_storage_channel(class_id, username=chat_username, channel_id=chat_id):
-        # Send test message immediately
-        try:
-            await message.bot.send_message(chat_id, "✅ تم ربط هذه القناة بنجاح كقناة تخزين للبوت.")
-            await message.answer(f"✅ تم تعيين قناة التخزين بنجاح: {chat_username or chat_id}\n📢 تم إرسال رسالة اختبار للقناة للتأكد من الصلاحيات.")
-        except Exception as e:
-            await message.answer(f"⚠️ تم حفظ القناة، ولكن فشل إرسال رسالة الاختبار: {e}\nيرجى التأكد من أن البوت مشرف ولديه صلاحية **نشر الرسائل**.")
+        await message.answer(
+            f"✅ **تم التحقق والربط بنجاح!**\n\n"
+            f"📢 القناة: {chat_title}\n"
+            f"🆔 المعرف: {chat_id}\n"
+            f"✅ تم التأكد من صلاحيات البوت.\n"
+            f"✅ تم اعتماد القناة كقناة تخزين للمرحلة."
+        )
     else:
         await message.answer("❌ حدث خطأ في قاعدة البيانات.")
         return
@@ -411,7 +403,6 @@ async def admin_set_storage_process(message: Message, state: FSMContext, db: Dat
     await state.clear()
 
     # --- REFRESH LOGIC ---
-    # Refresh the settings menu
     try:
         class_info = await db.get_class(class_id)
         if class_info:
@@ -435,7 +426,6 @@ async def admin_set_storage_process(message: Message, state: FSMContext, db: Dat
     except Exception as e:
         logger.error(f"Error refreshing settings menu: {e}")
         
-    # Try to delete the user's message
     try:
         await message.delete()
     except:
@@ -461,8 +451,8 @@ async def admin_clear_storage(callback: CallbackQuery, db: DatabaseManager, conf
         await callback.answer("❌ حدث خطأ.", show_alert=True)
 
 @router.callback_query(F.data.startswith("admin_test_storage_"))
-async def admin_test_storage(callback: CallbackQuery, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
-    """Test storage channel for a class"""
+async def admin_test_storage(callback: CallbackQuery, state: FSMContext, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
+    """Test storage channel - Verify by Forwarding"""
     user_id = callback.from_user.id
     if not await check_is_superadmin(user_id, db, config or getattr(router, 'config', None), kwargs): return
 
@@ -475,13 +465,83 @@ async def admin_test_storage(callback: CallbackQuery, db: DatabaseManager, confi
             await callback.answer("⚠️ لا توجد قناة تخزين محددة.", show_alert=True)
             return
 
-        await callback.answer("⏳ جاري إرسال رسالة اختبار...", show_alert=False)
-        await callback.bot.send_message(storage_id, f"رسالة اختبار لقناة تخزين المرحلة: {class_info['class_name']}")
-        await callback.answer("✅ تم إرسال رسالة الاختبار بنجاح!", show_alert=True)
+        await state.update_data(class_id=class_id, expected_channel_id=storage_id, original_message_id=callback.message.message_id)
+        await state.set_state(ClassManagementStates.waiting_for_test_message)
+
+        await callback.message.edit_text(
+            "🕵️ **اختبار قناة التخزين**\n\n"
+            "لإتمام الاختبار، يرجى **تحويل (Forward) رسالة من قناة التخزين المحددة إلى هنا.**\n\n"
+            f"القناة المحددة: {storage_id}\n"
+            "سيقوم النظام بالتحقق من مطابقة القناة وصلاحيات البوت.",
+            reply_markup=InlineKeyboards.back_button(f"admin_settings_{class_id}")
+        )
 
     except Exception as e:
-        logger.error(f"Error testing storage: {e}")
-        await callback.answer(f"❌ فشل الاختبار: {e}", show_alert=True)
+        logger.error(f"Error starting storage test: {e}")
+        await callback.answer(f"❌ حدث خطأ: {e}", show_alert=True)
+
+@router.message(ClassManagementStates.waiting_for_test_message)
+async def admin_test_storage_process(message: Message, state: FSMContext, db: DatabaseManager):
+    """Process storage test message"""
+    data = await state.get_data()
+    expected_channel_id = data.get("expected_channel_id")
+    class_id = data.get("class_id")
+
+    # 1. Strict Check: Must be forwarded from a channel
+    if not (message.forward_from_chat and message.forward_from_chat.type == "channel"):
+        await message.answer("❌ **فشل الاختبار:** يجب تحويل رسالة من القناة حصراً.")
+        return
+
+    forwarded_id = message.forward_from_chat.id
+    
+    # 2. Check if it matches the configured channel
+    if forwarded_id != expected_channel_id:
+        await message.answer(
+            f"❌ **فشل الاختبار:** القناة التي حولت منها ({forwarded_id}) \n"
+            f"لا تطابق قناة التخزين المسجلة ({expected_channel_id})."
+        )
+        return
+
+    # 3. Check Permissions
+    try:
+        member = await message.bot.get_chat_member(forwarded_id, message.bot.id)
+        can_post = getattr(member, 'can_post_messages', True)
+        
+        if member.status in ["administrator", "creator"] and can_post:
+            await message.answer("✅ **الاختبار ناجح!**\n\nالبوت متصل بالقناة ويمتلك الصلاحيات المطلوبة.")
+        else:
+            await message.answer("⚠️ **تحذير:** القناة صحيحة، لكن البوت لا يمتلك صلاحية النشر الكاملة!")
+            
+    except Exception as e:
+        await message.answer(f"❌ حدث خطأ أثناء فحص الصلاحيات: {e}")
+        return
+
+    await state.clear()
+    
+    # Refresh menu
+    try:
+        class_info = await db.get_class(class_id)
+        has_storage = bool(class_info.get("storage_channel_id"))
+        text = (
+            f"⚙️ **إعدادات المرحلة: {class_info['class_name']}**\n\n"
+            f"قناة التخزين هي قناة خاصة يتم فيها حفظ ملفات هذه المرحلة لتقليل الضغط على البوت.\n\n"
+            f"الحالة الحالية: **✅ تم الاختبار بنجاح**"
+        )
+        keyboard = InlineKeyboards.admin_class_settings_menu(class_id, has_storage)
+        
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=message.chat.id,
+            message_id=data.get("original_message_id"),
+            reply_markup=keyboard
+        )
+    except:
+        pass
+    
+    try:
+        await message.delete()
+    except:
+        pass
 
 @router.callback_query(F.data.startswith("admin_set_manager_"))
 async def admin_set_manager_start(callback: CallbackQuery, state: FSMContext, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):

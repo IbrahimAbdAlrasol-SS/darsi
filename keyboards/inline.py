@@ -184,7 +184,7 @@ class InlineKeyboards:
             [InlineKeyboardButton(text=f"🔄 الكورس الحالي: {course_text}", callback_data=f"manager_set_course_{class_id}_{next_course}")],
             [InlineKeyboardButton(text="📚 المواد", callback_data=f"manager_subjects_{class_id}_{current_course}"),
              InlineKeyboardButton(text=f"➕ إضافة مادة (كورس {current_course})", callback_data=f"manager_add_subject_{class_id}_{current_course}")],
-            # Exams button removed as per request
+            [InlineKeyboardButton(text="📝 الامتحانات", callback_data=f"manager_exams_{class_id}_{current_course}")],
             [InlineKeyboardButton(text="🔙 رجوع", callback_data="manager_classes")]
         ])
     
@@ -362,6 +362,9 @@ class InlineKeyboards:
                 InlineKeyboardButton(text="📚 النظري", callback_data=f"user_files_{subject_id}_theory"),
                 InlineKeyboardButton(text="🧪 العملي", callback_data=f"user_files_{subject_id}_practical")
             ],
+            [
+                InlineKeyboardButton(text="📝 الامتحانات", callback_data=f"user_exams_{subject_id}")
+            ],
             [InlineKeyboardButton(text=fav_text, callback_data=f"toggle_favorite_{subject_id}")],
         ]
         
@@ -370,6 +373,22 @@ class InlineKeyboards:
             
         buttons.append([InlineKeyboardButton(text="🔙 عودة للمواد", callback_data=f"class_{class_id}_{course}")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    @staticmethod
+    def user_exam_types(subject_id: int) -> InlineKeyboardMarkup:
+        """User exam types menu"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📝 كوز", callback_data=f"user_exam_type_quiz_{subject_id}"),
+                InlineKeyboardButton(text="📝 مد", callback_data=f"user_exam_type_mid_{subject_id}")
+            ],
+            [
+                InlineKeyboardButton(text="📝 نصف سنة", callback_data=f"user_exam_type_midyear_{subject_id}"),
+                InlineKeyboardButton(text="📝 أخير سنة", callback_data=f"user_exam_type_final_{subject_id}")
+            ],
+            [InlineKeyboardButton(text="🔙 رجوع", callback_data=f"subject_{subject_id}")]
+        ])
+
     
     @staticmethod
     def favorites_list(subjects: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
@@ -383,7 +402,7 @@ class InlineKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     @staticmethod
-    def user_exams_list(exams: List[Dict[str, Any]], subject_id: int) -> InlineKeyboardMarkup:
+    def user_exams_list(exams: List[Dict[str, Any]], subject_id: int, exam_type: str) -> InlineKeyboardMarkup:
         """User exams list"""
         buttons = []
         for exam in exams:
@@ -395,8 +414,8 @@ class InlineKeyboards:
         if exams:
             buttons.append([InlineKeyboardButton(
                 text="📦 إرسال الكل",
-                callback_data=f"send_all_exams_{subject_id}"
+                callback_data=f"send_all_exams_{subject_id}_{exam_type}"
             )])
         
-        buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=f"subject_{subject_id}")])
+        buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=f"user_exams_{subject_id}")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)

@@ -409,9 +409,6 @@ async def manager_add_file_start(callback: CallbackQuery, state: FSMContext, db:
     class_settings = await db.get_class_settings(subject['class_id'])
     storage_id = class_settings.get('storage_channel_id') if class_settings else None
     
-    if not storage_id and config:
-        storage_id = config.get("storage_channel", {}).get("channel_id")
-        
     if not storage_id:
         await callback.answer("⚠️ لم يتم تحديد قناة تخزين لهذه المرحلة! يرجى مراجعة المشرف.", show_alert=True)
         return
@@ -423,54 +420,65 @@ async def manager_add_file_start(callback: CallbackQuery, state: FSMContext, db:
     
     await callback.message.edit_text(
         f"📎 إضافة ملف ({type_text}) للمادة: {subject['subject_name']}\n\n"
-        f"📤 **الآن أرسل الملف مباشرة هنا**\n"
-        f"يمكنك إرسال (ملف، صورة، فيديو، صوت) أو توجيه رسالة من أي قناة.\n"
-        f"سيقوم النظام تلقائياً بنسخ الملف لقناة التخزين.",
+        f"📤 **الآن قم بتوجيه (Forward) رسالة الملف من قناة التخزين إلى هنا.**\n"
+        f"سيقوم النظام بحفظ مرجع الملف فقط دون نسخه.",
         reply_markup=InlineKeyboards.back_button(f"manager_files_{subject_id}_{file_type}")
     )
 
 
-@router.message(StateFilter(FileStates.waiting_for_file), F.content_type.in_({'document', 'video', 'audio', 'photo', 'voice'}))
+@router.message(StateFilter(FileStates.waiting_for_file))
 async def manager_add_file_content(message: Message, state: FSMContext, db: DatabaseManager, config: Dict[str, Any] = None, **kwargs):
-    """Handle direct file forwarding/upload - Auto Copy to Storage"""
+    """Handle forwarded file from storage channel"""
     data = await state.get_data()
     subject_id = data.get("subject_id")
-    
+    user_id = message.from_user.id
+
     subject = await db.get_subject(subject_id)
     if not subject:
         await message.answer("❌ المادة غير موجودة")
         await state.clear()
         return
 
-    # Get storage channel
-    class_settings = await db.get_class_settings(subject['class_id'])
-    storage_id = class_settings.get('storage_channel_id') if class_settings else None
-    
-    # Fallback to config
-    if not storage_id and config:
-        storage_id = config.get("storage_channel", {}).get("channel_id")
-        
-    if not storage_id:
-        await message.answer("❌ لم يتم تحديد قناة تخزين لهذه المرحلة. يرجى مراجعة المشرف.")
+    if not await db.is_class_manager(user_id, subject['class_id']):
+        await message.answer("❌ ليس لديك صلاحية")
+        await state.clear()
         return
 
-    # Copy message to storage channel
-    try:
-        # We use copy_to to preserve content
-        copied = await message.copy_to(chat_id=storage_id)
-        
-        # Save the new message ID
-        await state.update_data(channel_message_id=copied.message_id)
-        await state.set_state(FileStates.waiting_for_file_name)
-        
-        await message.reply(
-            f"✅ تم استلام الملف ونسخه لقناة التخزين.\n\n"
-            "📝 **أرسل اسم الملف الآن:**\n"
-            "(مثلاً: المحاضرة الأولى - مقدمة)"
-        )
-    except Exception as e:
-        logger.error(f"Failed to copy file to storage: {e}")
-        await message.reply(f"❌ فشل نسخ الملف إلى قناة التخزين.\nالسبب: {e}\n\nتأكد من أن البوت مشرف في قناة التخزين ولديه صلاحية النشر.")
+    # Strict check for forwarded message
+    if not message.forward_from_chat or not getattr(message, "forward_from_message_id", None):
+        await message.reply("⚠️ خطأ: يرجى توجيه (Forward) رسالة من قناة التخزين، وليس إرسال ملف جديد.")
+        return
+
+    # Verify the source of the forwarded message
+    class_settings = await db.get_class_settings(subject['class_id'])
+    storage_id = class_settings.get("storage_channel_id") if class_settings else None
+    storage_username = class_settings.get("storage_channel_username") if class_settings else None
+    
+    fwd_chat_id = message.forward_from_chat.id
+    fwd_username = message.forward_from_chat.username
+
+    is_valid_source = False
+    if storage_id and fwd_chat_id == storage_id:
+        is_valid_source = True
+    elif storage_username and fwd_username and storage_username.lstrip('@').lower() == fwd_username.lower():
+        is_valid_source = True
+
+    if not is_valid_source:
+        await message.reply("❌ خطأ: هذه الرسالة ليست من قناة التخزين المحددة لهذه المرحلة.")
+        return
+
+    # If we are here, the forward is valid. Save the reference.
+    await state.update_data(channel_message_id=message.forward_from_message_id)
+    await state.set_state(FileStates.waiting_for_file_name)
+    
+    file_type = data.get("file_type", "theory")
+    
+    await message.reply(
+        f"✅ تم حفظ مرجع الملف بنجاح.\n\n"
+        "📝 أرسل اسم الملف الآن:\n"
+        "(مثلاً: المحاضرة الأولى - مقدمة)",
+        reply_markup=InlineKeyboards.back_button(f"manager_files_{subject_id}_{file_type}")
+    )
 
 
 @router.message(StateFilter(FileStates.waiting_for_file))
